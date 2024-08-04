@@ -2,23 +2,14 @@ mod tests;
 
 use core::hint::unreachable_unchecked;
 use core::marker::PhantomData;
-use core::mem::transmute;
-use core::ptr::slice_from_raw_parts;
-use core::slice::from_raw_parts;
 
 /// An iterator over a slice.
 pub struct Cursor<'a> {
-    /// The pointer to the first element.
-    first: *const u8,
-    
     /// The pointer to the next element.
     cursor: *const u8,
     
     /// The pointer to the past-the-end element.
     end: *const u8,
-    
-    /// The number of bytes consumed.
-    index: u64,
     
     /// The marker for ownership of `&[u8]`.
     _marker: PhantomData<&'a [u8]>,
@@ -70,8 +61,16 @@ pub enum Error {
 
 impl<'a> Cursor<'a> {
     #[inline]
-    pub const fn as_slice(&self) -> &[u8] {
-        unsafe { from_raw_parts(self.first, self.end.offset_from(self.first) as usize) }
+    pub fn skip_ascii_whitespace(&mut self) {
+        loop {
+            match self.peek() {
+                None => break,
+                Some(x) if !x.is_ascii_whitespace() => break,
+                Some(_) => {
+                    unsafe { self.advance_unchecked() }
+                }
+            }
+        }
     }
     
     #[inline]
@@ -82,10 +81,8 @@ impl<'a> Cursor<'a> {
     #[inline]
     pub const fn new(slice: &[u8]) -> Self {
         Self {
-            first: slice.as_ptr(),
             cursor: slice.as_ptr(),
             end: unsafe { slice.as_ptr().add(slice.len()) },
-            index: 0,
             _marker: PhantomData,
         }
     }
@@ -114,12 +111,12 @@ impl<'a> Cursor<'a> {
     /// Gets the next byte. Does not normalize line terminators.
     #[inline]
     pub fn next(&mut self) -> Option<u8> {
-        if !self.has_next() {
-            None
-        } else {
+        if self.has_next() {
             let byte = unsafe { self.peek_unchecked() };
             unsafe { self.advance_unchecked() };
             Some(byte)
+        } else {
+            None
         }
     }
 
@@ -144,6 +141,18 @@ impl<'a> Cursor<'a> {
             Some(unsafe { self.peek_unchecked() })
         }
     }
+
+    /// Peeks into the nth byte, first byte is n=0. Does not advance.
+    #[inline]
+    pub fn peek_n(&self, n: usize) -> Option<u8> {
+        let desired_byte_ptr = unsafe { self.cursor.add(n) };
+
+        if desired_byte_ptr < self.end {
+            Some(unsafe { *desired_byte_ptr })
+        } else {
+            None
+        }
+    }
     
     /// Checks if the cursor has a next byte.
     #[inline]
@@ -161,10 +170,11 @@ impl<'a> Cursor<'a> {
         *self.cursor
     }
 
+    /*
     #[inline]
+    #[deprecated]
     pub fn rewind_lfn(&mut self) {
         if self.can_rewind() {
-            self.index -= 1;
             self.cursor = unsafe { self.cursor.sub(1) };
             
             if unsafe { *self.cursor } == b'\n'
@@ -177,17 +187,20 @@ impl<'a> Cursor<'a> {
     
     /// Checks if the cursor can be rewinded.
     #[inline]
+    #[deprecated]
     pub fn can_rewind(&mut self) -> bool {
         self.cursor > self.first
     }
     
     /// Rewinds one byte. Saturates at the lower boundary.
     #[inline]
+    #[deprecated]
     pub fn rewind(&mut self) {
         if self.can_rewind() {
             unsafe { self.rewind_unchecked(); }
         }
     }
+    */
     
     /// Rewinds one byte.
     /// 
@@ -196,7 +209,6 @@ impl<'a> Cursor<'a> {
     /// The caller must ensure that the cursor can rewind.
     #[inline]
     pub unsafe fn rewind_unchecked(&mut self) {
-        self.index -= 1;
         self.cursor = self.cursor.sub(1);
     }
     
@@ -215,21 +227,17 @@ impl<'a> Cursor<'a> {
     /// The caller must ensure that the cursor is not at the end.
     #[inline]
     pub unsafe fn advance_unchecked(&mut self) {
-        self.index += 1;
         self.cursor = self.cursor.add(1)
     }
 
     #[inline]
     pub unsafe fn advance_char_unchecked(&mut self) {
-        self.index += 1;
         self.cursor = self.cursor.add(UTF8_CHAR_WIDTH[self.peek_unchecked() as usize] as usize);
     }
     
     /// Advances the cursor by one char encoded as UTF-8.
     #[inline]
     pub fn advance_char(&mut self) -> Result<(), Error> {
-        self.index += 1;
-        
         let first_byte = match self.next() {
             Some(x) => x,
             None => return Ok(()),
@@ -272,33 +280,10 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    #[inline]
-    pub fn begin_recording<'c>(&'c mut self) -> Recorder<'a, 'c> {
-        Recorder {
-            start: self.cursor,
-            cursor: self,
-        }
-    }
-    
-    #[inline]
-    pub const fn index(&self) -> u64 {
-        self.index
-    }
-}
-
-pub struct Recorder<'a, 'c> {
-    pub cursor: &'c mut Cursor<'a>,
-    start: *const u8,
-}
-
-impl<'a, 'c> Recorder<'a, 'c> {
-    #[inline]
-    pub fn stop(self) -> &'a str {
-        unsafe { transmute(slice_from_raw_parts(
-            self.start,
-            self.start.offset_from(self.cursor.cursor).unsigned_abs()
-        )) }
-    }
+    // #[inline]
+    // pub const fn offset(&self) -> usize {
+    //     unsafe { self.cursor.sub_ptr(self.first) }
+    // }
 }
 
 const UTF8_CHAR_WIDTH: &[u8; 256] = &[
